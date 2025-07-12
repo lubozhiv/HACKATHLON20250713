@@ -4,7 +4,6 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List
 
-
 @dataclass
 class QualityMetrics:
     engagement_score: float

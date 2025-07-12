@@ -2,11 +2,6 @@ import json
 import os
 from typing import List, Dict, Any
 from langchain.schema import Document
-from AdvancedPreprocessingImplementation.filter_1_quality_metrics import filter_by_quality
-from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from AdvancedPreprocessingImplementation.filter_3_noise import NoiseDetector
-import numpy as np
-
 
 
 def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str = "") -> List[Document]:
@@ -140,26 +135,20 @@ if __name__ == "__main__":
     # Load all documents from the datasets directory
     all_documents = load_all_json_files_from_directory('datasets')
 
-    # # Apply quality filter
-    # quality_threshold = 0.5  # Adjust this value as needed
-    # filtered_documents_filter_1 = filter_by_quality(all_documents, min_score=quality_threshold)
+    # Apply quality filter
+    quality_threshold = 0.5  # Adjust this value as needed
+    filtered_documents = filter_by_quality(all_documents, min_score=quality_threshold)
 
-    pain_detector = AdvancedPainDetector()
-    pain_filtered_docs_filter_2 = pain_detector.filter_documents_by_pain(
-        all_documents,
-        min_pain_score=0.01, #why this score should be set that low
-        max_pain_score=1.0
-    )
     # Print summary information
     print(f"Total documents loaded: {len(all_documents)}")
-    print(f"Documents after quality filtering: {len(pain_filtered_docs_filter_2)}")
-    print(f"Filtered {len(all_documents) - len(pain_filtered_docs_filter_2)} low-quality documents")
+    print(f"Documents after quality filtering: {len(filtered_documents)}")
+    print(f"Filtered {len(all_documents) - len(filtered_documents)} low-quality documents")
 
     # Print first few filtered documents if you want to inspect them
-    # for i, doc in enumerate(pain_filtered_docs_filter_2[:200], 1):
-    #     print(f"\nDocument {i}:")
-    #     print(f"Source file: {doc.metadata['source_file']}")
-    #     # print(f"Quality Score: {doc.metadata['quality_metrics']['overall_quality']:.2f}")
-    #     print(f"Page Content (first 200 chars):\n{doc.page_content[:200]}...")
-    #     print(f"Metadata: {doc.metadata}")
-    #     print("-" * 50)
+    for i, doc in enumerate(filtered_documents[:200], 1):
+        print(f"\nDocument {i}:")
+        print(f"Source file: {doc.metadata['source_file']}")
+        print(f"Quality Score: {doc.metadata['quality_metrics']['overall_quality']:.2f}")
+        print(f"Page Content (first 200 chars):\n{doc.page_content[:200]}...")
+        print(f"Metadata: {doc.metadata}")
+        print("-" * 50)

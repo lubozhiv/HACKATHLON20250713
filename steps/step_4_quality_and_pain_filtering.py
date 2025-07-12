@@ -4,8 +4,6 @@ from typing import List, Dict, Any
 from langchain.schema import Document
 from AdvancedPreprocessingImplementation.filter_1_quality_metrics import filter_by_quality
 from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from AdvancedPreprocessingImplementation.filter_3_noise import NoiseDetector
-import numpy as np
 
 
 

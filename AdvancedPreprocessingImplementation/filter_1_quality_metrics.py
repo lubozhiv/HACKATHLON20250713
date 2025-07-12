@@ -1,3 +1,18 @@
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List, Optional
+from langchain.schema import Document
+
+
+@dataclass
+class QualityMetrics:
+    engagement_score: float
+    discussion_depth: float
+    response_quality: float
+    time_pattern_score: float
+    overall_quality: float
+
+
 class CompositeQualityScorer:
     def __init__(self):
         self.weights = {
@@ -8,27 +23,22 @@ class CompositeQualityScorer:
         }
 
     def calculate_engagement_score(self, post_data: Dict) -> float:
-        """Beyond just comment count - look at engagement patterns"""
+        """Updated to work with Reddit API structure"""
         num_comments = post_data.get('num_comments', 0)
-        upvotes = post_data.get('ups', 0)
-        downvotes = post_data.get('downs', 0)
+        score = post_data.get('score', 0)  # net score (upvotes - downvotes)
+        upvote_ratio = post_data.get('upvote_ratio', 1.0)  # percentage of upvotes
 
-        # Avoid division by zero
         if num_comments == 0:
             return 0.0
 
-        # Comment-to-upvote ratio (higher = more engaging discussion)
-        engagement_ratio = min(num_comments / max(upvotes, 1), 5.0)
+        # Estimate controversy (0 = no downvotes, 0.5 = balanced, 1 = heavily downvoted)
+        controversy = abs(upvote_ratio - 0.5) * 2 if upvote_ratio < 1.0 else 0
 
-        # Controversy score (balanced up/down votes indicate heated discussion)
-        if upvotes + downvotes > 0:
-            controversy = min(downvotes / (upvotes + downvotes), 0.5) * 2
-        else:
-            controversy = 0
+        # New engagement calculation
+        base_score = min(num_comments / 20, 1.0)
+        participation_ratio = min(num_comments / max(score, 1), 5.0)
 
-        # Normalize to 0-1 scale
-        base_score = min(num_comments / 20, 1.0)  # 20+ comments = max score
-        return (base_score + engagement_ratio / 5 + controversy) / 3
+        return (base_score + participation_ratio / 5 + controversy) / 3
 
     def calculate_discussion_depth(self, comments: List[Dict]) -> float:
         """Measure how deep and back-and-forth the discussion gets"""
@@ -132,3 +142,56 @@ class CompositeQualityScorer:
             time_pattern_score=time_pattern,
             overall_quality=overall
         )
+
+
+def filter_by_quality(
+        documents: List[Document],
+        min_score: float = 0.5,
+        scorer: Optional[CompositeQualityScorer] = None
+) -> List[Document]:
+    """
+    Filter documents based on quality score from CompositeQualityScorer.
+
+    Args:
+        documents: List of LangChain Document objects
+        min_score: Minimum overall quality score to keep (0.0-1.0)
+        scorer: Optional pre-configured CompositeQualityScorer instance
+
+    Returns:
+        Filtered list of documents that meet the quality threshold
+    """
+    if scorer is None:
+        scorer = CompositeQualityScorer()
+
+    filtered_docs = []
+
+    for doc in documents:
+        # Convert document metadata to post_data format
+        post_data = doc.metadata
+        comments = []
+
+        # Extract comments from page_content
+        page_content = doc.page_content
+        if "Comments:" in page_content:
+            comments_section = page_content.split("Comments:")[1]
+            comments = [{"body": comment.split(": ", 1)[1]} for comment in comments_section.split("\n\n")
+                        if comment.startswith("Comment ")]
+
+        # Score the post
+        metrics = scorer.score_post(post_data, comments)
+
+        # Keep if meets minimum quality
+        if metrics.overall_quality >= min_score:
+            # Add quality metrics to document metadata
+            doc.metadata.update({
+                "quality_metrics": {
+                    "engagement_score": metrics.engagement_score,
+                    "discussion_depth": metrics.discussion_depth,
+                    "response_quality": metrics.response_quality,
+                    "time_pattern_score": metrics.time_pattern_score,
+                    "overall_quality": metrics.overall_quality
+                }
+            })
+            filtered_docs.append(doc)
+
+    return filtered_docs

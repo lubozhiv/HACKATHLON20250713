@@ -1,7 +1,12 @@
+# EnhancedPainDetection.py
+
 import re
+import numpy as np
+from typing import List, Dict, Optional
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.cluster import KMeans
+from langchain.schema import Document
 
 
 class AdvancedPainDetector:
@@ -115,3 +120,54 @@ class AdvancedPainDetector:
         )
 
         return total_pain
+
+    def filter_documents_by_pain(
+            self,
+            documents: List[Document],
+            min_pain_score: float = 0.3,
+            max_pain_score: float = 1.0
+    ) -> List[Document]:
+        """
+        Filter documents based on pain score.
+
+        Args:
+            documents: List of LangChain Document objects
+            min_pain_score: Minimum pain score to keep (0.0-1.0)
+            max_pain_score: Maximum pain score to keep (0.0-1.0)
+
+        Returns:
+            Filtered list of documents within the specified pain score range
+        """
+        filtered_docs = []
+
+        for doc in documents:
+            # Convert document metadata to post_data format
+            post_data = doc.metadata
+            comments = []
+
+            # Extract comments from page_content
+            page_content = doc.page_content
+            if "Comments:" in page_content:
+                comments_section = page_content.split("Comments:")[1]
+                comments = [{"body": comment.split(": ", 1)[1]} for comment in comments_section.split("\n\n")
+                            if comment.startswith("Comment ")]
+
+            # Calculate pain score
+            pain_score = self.calculate_pain_score(post_data, comments)
+
+            # Keep if within pain score range
+            if min_pain_score <= pain_score <= max_pain_score:
+                # Add pain metrics to document metadata
+                doc.metadata.update({
+                    "pain_metrics": {
+                        "pain_score": pain_score,
+                        "post_pain": self.extract_pain_signals(
+                            f"{post_data.get('title', '')} {post_data.get('selftext', '')}"
+                        ),
+                        "comments_pain": [self.extract_pain_signals(comment["body"])
+                                          for comment in comments[:10]] if comments else []
+                    }
+                })
+                filtered_docs.append(doc)
+
+        return filtered_docs
