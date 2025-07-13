@@ -10,8 +10,6 @@ from AdvancedPreprocessingImplementation.no_4_embedded_to_qdrant import QdrantEm
 from qdrant_search_idea_generator import QdrantSearchAndIdeaGenerator
 
 
-
-
 def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str = "") -> List[Document]:
     """
     Convert JSON topics with comments to LangChain Document objects.
@@ -23,16 +21,10 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
         title = topic.get("title", "")
         selftext = topic.get("selftext", "")
 
-        # Extract comment bodies
+        # Extract comments - store full comment objects, not just bodies
         comments = topic.get("comments", [])
-        comment_bodies = []
 
-        for comment in comments:
-            body = comment.get("body", "")
-            if body:
-                comment_bodies.append(body)
-
-        # Create page_content by combining title, selftext, and comments
+        # Create page_content by combining title, selftext, and comment bodies
         page_content_parts = []
 
         if title:
@@ -40,6 +32,13 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
 
         if selftext:
             page_content_parts.append(f"Content: {selftext}")
+
+        # Extract comment bodies for page_content
+        comment_bodies = []
+        for comment in comments:
+            body = comment.get("body", "")
+            if body:
+                comment_bodies.append(body)
 
         if comment_bodies:
             page_content_parts.append("Comments:")
@@ -66,7 +65,12 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
             "spoiler": topic.get("spoiler", False),
             "locked": topic.get("locked", False),
             "comments_extracted": topic.get("comments_extracted", 0),
-            "source_file": filename
+            "source_file": filename,
+            # Add title and selftext for the noise filter
+            "title": title,
+            "selftext": selftext,
+            # Store full comment objects for noise filtering
+            "comments": comments
         }
 
         # Create Document object
@@ -159,10 +163,30 @@ def sync_metadata_with_qdrant(embedding_service: QdrantEmbeddingService,
             # Prepare payload with all metadata
             payload = {}
             for key, value in doc.metadata.items():
+                # Skip the comments list - it's already reflected in the page_content
+                if key == 'comments':
+                    continue
+
                 if isinstance(value, (np.integer, np.floating)):
                     payload[key] = float(value)
                 elif value is None:
                     payload[key] = ""
+                elif isinstance(value, dict):
+                    # Handle nested dictionaries like filtering_stats
+                    flattened = {}
+                    for sub_key, sub_value in value.items():
+                        if isinstance(sub_value, dict):
+                            # Further flatten nested dicts
+                            for sub_sub_key, sub_sub_value in sub_value.items():
+                                if isinstance(sub_sub_value, (int, float, np.integer, np.floating)):
+                                    flattened[f"{key}_{sub_key}_{sub_sub_key}"] = float(sub_sub_value)
+                                else:
+                                    flattened[f"{key}_{sub_key}_{sub_sub_key}"] = sub_sub_value
+                        elif isinstance(sub_value, (int, float, np.integer, np.floating)):
+                            flattened[f"{key}_{sub_key}"] = float(sub_value)
+                        else:
+                            flattened[f"{key}_{sub_key}"] = sub_value
+                    payload.update(flattened)
                 else:
                     payload[key] = value
 
@@ -181,6 +205,28 @@ def sync_metadata_with_qdrant(embedding_service: QdrantEmbeddingService,
                 continue
 
     print(f"Metadata synchronization complete for {len(documents)} documents")
+
+
+def print_filtering_summary(documents: List[Document], stage: str):
+    """
+    Print summary statistics for noise filtering
+    """
+    if stage == "noise" and documents:
+        # Calculate average removal rate and other stats
+        removal_rates = []
+        threshold_values = []
+
+        for doc in documents:
+            if 'filtering_stats' in doc.metadata:
+                stats = doc.metadata['filtering_stats']
+                removal_rates.append(stats.get('removal_rate', 0))
+                threshold_values.append(stats.get('adaptive_threshold', 0))
+
+        if removal_rates:
+            avg_removal = np.mean(removal_rates)
+            avg_threshold = np.mean(threshold_values)
+            print(f"  Average comment removal rate: {avg_removal:.1%}")
+            print(f"  Average adaptive threshold: {avg_threshold:.3f}")
 
 
 def interactive_search(embedding_service: QdrantEmbeddingService):
@@ -209,13 +255,44 @@ def interactive_search(embedding_service: QdrantEmbeddingService):
             if results["search_results"]:
                 print(f"\nTop {len(results['search_results'])} relevant discussions:")
                 for i, result in enumerate(results["search_results"], 1):
-                    comment_sim = result['payload'].get('comment_similarity_score', 'N/A')
-                    if comment_sim != 'N/A':
-                        comment_sim = f"{comment_sim:.2f}"
-                    print(f"{i}. Score: {result['score']:.2f} | Quality: {result['quality_score']:.2f} | "
-                          f"Pain: {result['pain_score']:.2f} | Comment Similarity: {comment_sim}")
-                    print(f"   Source: {result['payload'].get('subreddit', 'N/A')}")
-                    print(f"   Content preview: {result['payload']['text'][:200]}...\n")
+                    # Get metrics from the metrics dictionary
+                    metrics = result.get('metrics', {})
+                    payload = result.get('payload', {})
+
+                    # Extract available metrics
+                    comment_quality = metrics.get('comment_quality', 'N/A')
+                    if comment_quality != 'N/A':
+                        comment_quality = f"{comment_quality:.2f}"
+
+                    # Get pain score from payload (if available)
+                    pain_score = payload.get('pain_score', 'N/A')
+                    if pain_score != 'N/A':
+                        pain_score = f"{pain_score:.2f}"
+
+                    # Get quality score from payload (if available)
+                    quality_score = payload.get('quality_metrics_overall_quality', 'N/A')
+                    if quality_score != 'N/A':
+                        quality_score = f"{quality_score:.2f}"
+
+                    # Get filtering stats if available
+                    removal_rate = payload.get('comment_removal_rate', 'N/A')
+                    if removal_rate != 'N/A':
+                        removal_rate = f"{removal_rate:.1%}"
+
+                    # Get engagement metrics
+                    engagement = metrics.get('engagement_score', 'N/A')
+                    if engagement != 'N/A':
+                        engagement = f"{engagement:.2f}"
+
+                    # Get technical content indicator
+                    has_technical = payload.get('has_technical_content', False)
+                    technical_indicator = "✓" if has_technical else "✗"
+
+                    print(f"{i}. Score: {result['score']:.2f} | Quality: {quality_score} | "
+                          f"Pain: {pain_score} | Comment Quality: {comment_quality} | "
+                          f"Engagement: {engagement} | Technical: {technical_indicator}")
+                    print(f"   Comments Removed: {removal_rate} | Source: {payload.get('subreddit', 'N/A')}")
+                    print(f"   Content preview: {payload.get('text', '')[:200]}...\n")
             else:
                 print("No search results found.")
 
@@ -223,8 +300,24 @@ def interactive_search(embedding_service: QdrantEmbeddingService):
             print("\nGenerated Product Ideas:\n")
             print(results["ideas"])
 
+            # Display quality analysis if available
+            if "quality_analysis" in results:
+                qa = results["quality_analysis"]
+                print(f"\nSearch Quality Analysis:")
+                print(f"Quality Level: {qa['quality']}")
+                if "overall_score" in qa:
+                    print(f"Overall Score: {qa['overall_score']:.2f}")
+
+                # Show recommendations if available
+                if "recommendations" in results and results["recommendations"]:
+                    print(f"\nRecommendations:")
+                    for rec in results["recommendations"]:
+                        print(f"  • {rec}")
+
         except Exception as e:
             print(f"An error occurred: {str(e)}")
+            import traceback
+            traceback.print_exc()  # This will help debug future issues
 
 
 if __name__ == "__main__":
@@ -249,14 +342,15 @@ if __name__ == "__main__":
     )
     print(f"Documents after pain filtering: {len(pain_filtered_documents)}")
 
-    # Apply noise filtering
-    print("Applying noise filtering...")
+    # Apply noise filtering with v4 enhancements
+    print("Applying noise filtering (v4 enhanced)...")
     noise_filter = RedditNoiseFilter(noise_threshold=0.52)
     noise_filtered_documents = noise_filter.filter_documents_by_noise(pain_filtered_documents)
     print(f"Documents after noise filtering: {len(noise_filtered_documents)}")
+    print_filtering_summary(noise_filtered_documents, "noise")
 
     # Insert documents into Qdrant with embeddings
-    print("Inserting documents into Qdrant...")
+    print("\nInserting documents into Qdrant...")
     embedding_service = QdrantEmbeddingService()
     embedding_service.create_collection(recreate=False)
     embedding_service.insert_documents(noise_filtered_documents)

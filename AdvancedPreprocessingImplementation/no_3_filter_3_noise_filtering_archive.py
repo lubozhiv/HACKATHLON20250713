@@ -1,9 +1,8 @@
 from sentence_transformers import SentenceTransformer
 import numpy as np
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Tuple
 from langchain.schema import Document
 import numpy.typing as npt
-import re
 
 
 class RedditNoiseFilter:
@@ -15,36 +14,8 @@ class RedditNoiseFilter:
             model_name: Name of the sentence transformer model to use
             noise_threshold: Similarity threshold below which comments are considered noise (0-1)
         """
-        try:
-            self.model = SentenceTransformer(model_name)
-        except Exception as e:
-            print(f"Error loading model {model_name}: {e}")
-            print("Falling back to all-MiniLM-L6-v2")
-            self.model = SentenceTransformer('all-MiniLM-L6-v2')
-
+        self.model = SentenceTransformer(model_name)
         self.noise_threshold = noise_threshold
-
-        # Common spam patterns for Reddit
-        self.spam_patterns = [
-            'check out my', 'click here', 'buy now', 'limited offer',
-            'make money', 'work from home', 'telegram', 'whatsapp',
-            'dm me', 'porn', 'onlyfans', '18+', 'nsfw'
-        ]
-
-        # Technical terms common in coding subreddits
-        self.technical_terms = {
-            'api', 'code', 'function', 'class', 'method', 'variable',
-            'bug', 'error', 'debug', 'compile', 'runtime', 'syntax',
-            'algorithm', 'data', 'structure', 'array', 'list', 'dict',
-            'github', 'git', 'commit', 'pull', 'push', 'merge',
-            'python', 'javascript', 'java', 'cpp', 'rust', 'golang',
-            'react', 'vue', 'angular', 'node', 'npm', 'pip',
-            'docker', 'kubernetes', 'aws', 'cloud', 'server',
-            'database', 'sql', 'nosql', 'mongodb', 'postgres',
-            'ai', 'ml', 'llm', 'gpt', 'claude', 'gemini', 'model',
-            'prompt', 'embedding', 'vector', 'transformer',
-            'mcp', 'cli', 'gui', 'ui', 'ux', 'frontend', 'backend'
-        }
 
     def embed_text(self, text: str) -> npt.NDArray:
         """Generate embedding for a single text"""
@@ -53,131 +24,6 @@ class RedditNoiseFilter:
     def calculate_similarity(self, embedding1: npt.NDArray, embedding2: npt.NDArray) -> float:
         """Calculate cosine similarity between two embeddings"""
         return float(np.dot(embedding1, embedding2) / (np.linalg.norm(embedding1) * np.linalg.norm(embedding2)))
-
-    def extract_keywords(self, text: str) -> Set[str]:
-        """Extract meaningful keywords from text"""
-        # Convert to lowercase and split
-        words = re.findall(r'\b\w+\b', text.lower())
-
-        # Filter out common stop words
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
-                      'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'been',
-                      'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-                      'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these',
-                      'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'them',
-                      'my', 'your', 'his', 'her', 'its', 'our', 'their'}
-
-        # Keep words that are technical terms or longer than 3 characters
-        keywords = {word for word in words
-                    if (word not in stop_words and len(word) > 3) or word in self.technical_terms}
-
-        return keywords
-
-    def contains_technical_vocabulary(self, text: str) -> bool:
-        """Check if text contains technical coding-related terms"""
-        text_lower = text.lower()
-        return any(term in text_lower for term in self.technical_terms)
-
-    def is_spam_or_offtopic(self, comment_text: str, post_keywords: Set[str]) -> bool:
-        """Check if comment is likely spam or completely off-topic"""
-        comment_lower = comment_text.lower()
-
-        # Check for spam patterns
-        if any(pattern in comment_lower for pattern in self.spam_patterns):
-            return True
-
-        # Check for keyword overlap
-        comment_keywords = self.extract_keywords(comment_text)
-        if post_keywords and comment_keywords:
-            keyword_overlap = len(comment_keywords & post_keywords) / len(post_keywords)
-            if keyword_overlap < 0.05:  # Less than 5% overlap
-                return True
-
-        return False
-
-    def calculate_adaptive_threshold(self, similarities: List[float]) -> float:
-        """Calculate adaptive threshold based on similarity distribution"""
-        if not similarities:
-            return self.noise_threshold
-
-        # Use statistical measures to set threshold
-        mean_sim = np.mean(similarities)
-        std_sim = np.std(similarities)
-
-        # Keep comments within 1.5 standard deviations below mean
-        # This adapts to the conversation's natural variance
-        adaptive_threshold = max(0.3, mean_sim - 1.5 * std_sim)
-
-        # Don't exceed the configured threshold
-        return min(adaptive_threshold, self.noise_threshold)
-
-    def calculate_relevance_score(self,
-                                  comment: Dict,
-                                  post_embedding: npt.NDArray,
-                                  post_text: str,
-                                  prev_comment_embedding: npt.NDArray = None,
-                                  comment_position: int = 0,
-                                  total_comments: int = 1) -> float:
-        """
-        Calculate comprehensive relevance score using multiple signals
-        """
-        comment_text = comment.get('body', '')
-        if not comment_text.strip():
-            return 0.0
-
-        # Generate embedding for comment
-        comment_embedding = self.embed_text(comment_text)
-
-        # 1. Semantic similarity to post
-        post_similarity = self.calculate_similarity(post_embedding, comment_embedding)
-        normalized_post_sim = max(0, min(1, (post_similarity + 1) / 2))
-
-        # 2. Conversation flow - similarity to previous comment
-        conversation_flow_score = 0.5  # Default neutral score
-        if prev_comment_embedding is not None and comment_position > 0:
-            prev_similarity = self.calculate_similarity(prev_comment_embedding, comment_embedding)
-            conversation_flow_score = max(0, min(1, (prev_similarity + 1) / 2))
-
-        # 3. Length ratio (avoid very short or very long comments relative to post)
-        post_length = max(len(post_text.split()), 10)  # Minimum 10 words
-        comment_length = len(comment_text.split())
-        length_ratio = comment_length / post_length
-
-        # Optimal length ratio between 0.1 and 3.0
-        if 0.1 <= length_ratio <= 3.0:
-            length_score = 1.0
-        elif length_ratio < 0.1:
-            length_score = length_ratio * 10  # Scale up very short comments
-        else:
-            length_score = max(0.3, 1.0 - (length_ratio - 3.0) * 0.1)
-
-        # 4. Technical content bonus
-        has_technical = self.contains_technical_vocabulary(comment_text)
-        technical_bonus = 1.2 if has_technical else 1.0
-
-        # 5. Position decay - earlier comments often more relevant
-        position_factor = 1.0 - (comment_position / max(total_comments, 1)) * 0.2
-
-        # 6. Check for meta-discussion indicators (common in coding subreddits)
-        meta_indicators = ['tried this', 'works for me', 'same issue', 'fixed it',
-                           'thanks', 'helped', 'solved', 'problem', 'solution',
-                           'update:', 'edit:', 'note:', 'btw', 'fyi']
-        has_meta = any(indicator in comment_text.lower() for indicator in meta_indicators)
-        meta_bonus = 1.1 if has_meta else 1.0
-
-        # Weighted combination of all factors
-        relevance = (
-                            0.4 * normalized_post_sim +  # Primary factor
-                            0.15 * conversation_flow_score +  # Conversation continuity
-                            0.15 * length_score +  # Appropriate length
-                            0.1 * position_factor +  # Position in thread
-                            0.2  # Base score
-                    ) * technical_bonus * meta_bonus
-
-        # Store the embedding for next iteration
-        comment['_embedding'] = comment_embedding
-
-        return min(relevance, 1.0)
 
     def filter_documents_by_noise(self, documents: List[Document]) -> List[Document]:
         """
@@ -194,108 +40,47 @@ class RedditNoiseFilter:
         for doc in documents:
             # Initialize variables for this document
             filtered_comments = []
-            all_similarities = []
-            relevance_scores = []
+            similarities = []
+            avg_similarity = 0.0
 
             # Skip if no comments exist
             if 'comments' not in doc.metadata or not doc.metadata['comments']:
-                doc.metadata['comment_similarity_score'] = 0.0
-                doc.metadata['filtering_stats'] = {
-                    'original_count': 0,
-                    'filtered_count': 0,
-                    'removal_rate': 0.0
-                }
+                doc.metadata['comment_similarity_score'] = avg_similarity
                 filtered_docs.append(doc)
                 continue
 
             # Combine title and content
-            title = doc.metadata.get('title', '')
-            content = doc.metadata.get('selftext', '')
-            post_text = f"{title} {content}".strip()
-
+            post_text = f"{doc.metadata.get('title', '')} {doc.metadata.get('selftext', '')}".strip()
             if not post_text:
-                doc.metadata['comment_similarity_score'] = 0.0
-                doc.metadata['filtering_stats'] = {
-                    'original_count': len(doc.metadata['comments']),
-                    'filtered_count': 0,
-                    'removal_rate': 1.0
-                }
+                doc.metadata['comment_similarity_score'] = avg_similarity
                 filtered_docs.append(doc)
                 continue
 
-            # Extract keywords from post
-            post_keywords = self.extract_keywords(post_text)
-
-            # Generate post embedding
+            # Generate embeddings
             post_embedding = self.embed_text(post_text)
             comments = doc.metadata['comments']
-            original_count = len(comments)
 
-            # Track previous comment embedding for conversation flow
-            prev_comment_embedding = None
-
-            # First pass: calculate all relevance scores
-            for i, comment in enumerate(comments):
+            # Process comments
+            for comment in comments:
                 if not comment.get('body', '').strip():
                     continue
 
-                # Check for obvious spam first
-                if self.is_spam_or_offtopic(comment['body'], post_keywords):
-                    relevance_scores.append(0.0)
-                    continue
+                comment_embed = self.embed_text(comment['body'])
+                similarity = self.calculate_similarity(post_embedding, comment_embed)
+                normalized_similarity = max(0, min(1, (similarity + 1) / 2))  # Normalize to 0-1 range
 
-                # Calculate comprehensive relevance score
-                relevance = self.calculate_relevance_score(
-                    comment,
-                    post_embedding,
-                    post_text,
-                    prev_comment_embedding,
-                    i,
-                    original_count
-                )
-
-                relevance_scores.append(relevance)
-                all_similarities.append(relevance)
-
-                # Update previous embedding if comment has one
-                if '_embedding' in comment:
-                    prev_comment_embedding = comment['_embedding']
-
-            # Calculate adaptive threshold based on score distribution
-            if relevance_scores:
-                adaptive_threshold = self.calculate_adaptive_threshold(relevance_scores)
-            else:
-                adaptive_threshold = self.noise_threshold
-
-            # Second pass: filter based on adaptive threshold
-            prev_comment_embedding = None
-            for i, comment in enumerate(comments):
-                if i < len(relevance_scores) and relevance_scores[i] >= adaptive_threshold:
-                    # Remove temporary embedding before adding to filtered list
-                    if '_embedding' in comment:
-                        prev_comment_embedding = comment.pop('_embedding')
+                similarities.append(normalized_similarity)
+                if normalized_similarity >= self.noise_threshold:
                     filtered_comments.append(comment)
 
-            # Calculate average similarity
-            avg_similarity = float(np.mean(all_similarities)) if all_similarities else 0.0
+            # Calculate average similarity (use 0 if no comments)
+            avg_similarity = float(np.mean(similarities)) if similarities else 0.0
 
-            # Create new document with filtered comments
+            # Create new document with filtered comments and updated page_content
             new_metadata = doc.metadata.copy()
             new_metadata['comments'] = filtered_comments
             new_metadata['comments_extracted'] = len(filtered_comments)
             new_metadata['comment_similarity_score'] = avg_similarity
-            new_metadata['filtering_stats'] = {
-                'original_count': original_count,
-                'filtered_count': len(filtered_comments),
-                'removal_rate': 1.0 - (len(filtered_comments) / original_count if original_count > 0 else 0),
-                'adaptive_threshold': adaptive_threshold,
-                'score_distribution': {
-                    'min': min(relevance_scores) if relevance_scores else 0,
-                    'max': max(relevance_scores) if relevance_scores else 0,
-                    'mean': np.mean(relevance_scores) if relevance_scores else 0,
-                    'std': np.std(relevance_scores) if relevance_scores else 0
-                }
-            }
 
             # Rebuild page_content to reflect filtered comments
             page_content_parts = []
@@ -434,7 +219,7 @@ if __name__ == "__main__":
                 {"body": "I'm getting new tires for my car next week"},
                 {"body": "The Perseverance rover is currently exploring Mars for signs of ancient life"},
                 {"body": "I can't find a good parking spot anywhere downtown"}
-            ],
+              ],
             "comments_extracted": 106
         }
     )
@@ -444,4 +229,3 @@ if __name__ == "__main__":
 
     print(f"Original comments: {len(example_doc.metadata['comments'])}")
     print(f"Filtered comments: {len(filtered_docs[0].metadata['comments'])}")
-    print(f"Filtering stats: {filtered_docs[0].metadata['filtering_stats']}")
