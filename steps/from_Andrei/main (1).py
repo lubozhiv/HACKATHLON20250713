@@ -5,7 +5,7 @@ from langchain.schema import Document
 from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
 from AdvancedPreprocessingImplementation.archived_filters.filter_3_noise import NoiseDetector
 import numpy as np
-from AdvancedPreprocessingImplementation.embedded_to_qdrant import QdrantEmbeddingService   # MY EMBEDDEDINGS
+from embedded_to_qdrant import QdrantEmbeddingService   # MY EMBEDDEDINGS
 
 
 
@@ -98,6 +98,7 @@ def load_json_from_file(file_path: str) -> List[Dict[str, Any]]:
         data = json.load(file)
 
     # Handle both single topic and list of topics
+    if isinstance(data, dict):
     if isinstance(data, dict):
         return [data]
     elif isinstance(data, list):

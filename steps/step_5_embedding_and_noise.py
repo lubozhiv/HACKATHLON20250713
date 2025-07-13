@@ -3,9 +3,7 @@ import os
 from typing import List, Dict, Any
 from langchain.schema import Document
 from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from AdvancedPreprocessingImplementation.archived_filters.filter_3_noise import NoiseDetector
-import numpy as np
-from AdvancedPreprocessingImplementation.embedded_to_qdrant import QdrantEmbeddingService   # MY EMBEDDEDINGS
+from embedded_to_qdrant import QdrantEmbeddingService # MY EMBEDDEDINGS
 
 
 
@@ -135,11 +133,14 @@ def load_all_json_files_from_directory(directory: str) -> List[Document]:
     return all_documents
 
 
-
+# Example usage
 if __name__ == "__main__":
     # Load all documents from the datasets directory
     all_documents = load_all_json_files_from_directory('datasets')
 
+    # # Apply quality filter
+    # quality_threshold = 0.5  # Adjust this value as needed
+    # filtered_documents_filter_1 = filter_by_quality(all_documents, min_score=quality_threshold)
 
     pain_detector = AdvancedPainDetector()
     pain_filtered_docs_filter_2 = pain_detector.filter_documents_by_pain(
@@ -151,58 +152,12 @@ if __name__ == "__main__":
     print(f"Total documents loaded: {len(all_documents)}")
     print(f"Documents after quality filtering: {len(pain_filtered_docs_filter_2)}")
     print(f"Filtered {len(all_documents) - len(pain_filtered_docs_filter_2)} low-quality documents")
+    # print(pain_filtered_docs_filter_2)
 
     # EMBEDDINGS TO Qdrant
     embedding_service = QdrantEmbeddingService()
     embedding_service.create_collection(recreate=False)
     embedding_service.insert_documents(pain_filtered_docs_filter_2)
-
-    QDRANT_HOST = "localhost"
-    QDRANT_PORT = 6333
-    COLLECTION_NAME = "reddit_pain_documents"  # This should match the collection name used by QdrantEmbeddingService
-
-    EPS = 0.5
-    MIN_SAMPLES = 5
-
-    FEATURE_PAYLOAD_KEYS = [
-        ["pain_metrics", "pain_score"],
-        "score",  # Top-level score
-        "upvote_ratio",  # Top-level upvote_ratio
-        "num_comments",  # Top-level num_comments
-        ["pain_metrics", "post_pain", "sentiment", "compound"],
-        ["pain_metrics", "post_pain", "keyword_matches", "frustration"],
-        ["pain_metrics", "post_pain", "total_keyword_matches"],
-        # Add other numerical fields you want to use for noise detection
-    ]
-
-
-    noise_detector = NoiseDetector(
-        qdrant_host=QDRANT_HOST,
-        qdrant_port=QDRANT_PORT,
-        collection_name=COLLECTION_NAME,
-        eps=EPS,
-        min_samples=MIN_SAMPLES,
-        feature_payload_keys=FEATURE_PAYLOAD_KEYS
-    )
-
-    # Perform noise detection using the detector instance
-    all_doc_ids, all_features, all_doc_payloads, cluster_labels = noise_detector.detect_noise()
-
-    if not all_doc_ids:
-        print("Exiting due to no data after noise detection retrieval.")
-        exit()
-
-    # Identify noise points from the cluster labels
-    noise_point_indices = np.where(cluster_labels == -1)[0]
-    noise_document_ids = [all_doc_ids[i] for i in noise_point_indices]
-
-    # Update Qdrant with the noise flags
-    noise_detector.update_noise_flags_in_qdrant(noise_document_ids, all_doc_ids)
-
-    unique_labels, counts = np.unique(cluster_labels, return_counts=True)
-    cluster_distribution = dict(zip(unique_labels, counts))
-    print("Noise detection and Qdrant payload update complete.")
-
 
     # Print first few filtered documents if you want to inspect them
     # for i, doc in enumerate(pain_filtered_docs_filter_2[:200], 1):
