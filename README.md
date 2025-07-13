@@ -22,7 +22,7 @@ mkdir datasets
 
 # Save the provided Python files in their respective locations:
 # - All no_*.py files go in AdvancedPreprocessingImplementation/
-# - main.py and qdrant_search_idea_generator.py go in root directory
+# - main_old.py and qdrant_search_idea_generator.py go in root directory
 ```
 
 ## Step 2: Install Dependencies
@@ -205,7 +205,7 @@ reddit-product-generator/
 ### First Run (Process Data)
 
 ```bash
-python main.py
+python main_old.py
 ```
 
 This will:
