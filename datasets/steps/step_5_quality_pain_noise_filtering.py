@@ -2,8 +2,9 @@ import json
 import os
 from typing import List, Dict, Any
 from langchain.schema import Document
-from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from embedded_to_qdrant import QdrantEmbeddingService # MY EMBEDDEDINGS
+from AdvancedPreprocessingImplementation.no_1_filter_1_quality_metrics import filter_by_quality
+from AdvancedPreprocessingImplementation.no_2_filter_2_pain_detection import AdvancedPainDetector
+from AdvancedPreprocessingImplementation.no_3_filter_3_noise_filteringV2 import RedditNoiseFilter
 
 
 
@@ -133,37 +134,66 @@ def load_all_json_files_from_directory(directory: str) -> List[Document]:
     return all_documents
 
 
+def apply_all_filters(documents: List[Document],
+                      quality_threshold: float = 0.5,
+                      min_pain_score: float = 0.01,
+                      max_pain_score: float = 1.0,
+                      noise_threshold: float = 0.3) -> List[Document]:
+    """
+    Apply all three filters to the documents in sequence:
+    1. Quality filter
+    2. Pain detection filter
+    3. Noise filter
+
+    Args:
+        documents: List of input documents
+        quality_threshold: Minimum quality score to keep
+        min_pain_score: Minimum pain score to keep
+        max_pain_score: Maximum pain score to keep
+        noise_threshold: Similarity threshold for comment filtering
+
+    Returns:
+        List of filtered documents
+    """
+    # Initialize filters
+    pain_detector = AdvancedPainDetector()
+    noise_filter = RedditNoiseFilter(noise_threshold=noise_threshold)
+
+    # Apply filters in sequence
+    quality_filtered = filter_by_quality(documents, min_score=quality_threshold)
+    pain_filtered = pain_detector.filter_documents_by_pain(
+        quality_filtered,
+        min_pain_score=min_pain_score,
+        max_pain_score=max_pain_score
+    )
+    noise_filtered = noise_filter.filter_documents_by_noise(pain_filtered)
+
+    return noise_filtered
+
+
+
 # Example usage
 if __name__ == "__main__":
     # Load all documents from the datasets directory
     all_documents = load_all_json_files_from_directory('datasets')
 
-    # # Apply quality filter
-    # quality_threshold = 0.5  # Adjust this value as needed
-    # filtered_documents_filter_1 = filter_by_quality(all_documents, min_score=quality_threshold)
-
-    pain_detector = AdvancedPainDetector()
-    pain_filtered_docs_filter_2 = pain_detector.filter_documents_by_pain(
+    # Apply all filters
+    filtered_documents = apply_all_filters(
         all_documents,
-        min_pain_score=0.01, #why this score should be set that low
-        max_pain_score=1.0
+        quality_threshold=0.3,
+        min_pain_score=0.002,
+        max_pain_score=1.0,
+        noise_threshold=0.25
     )
+
     # Print summary information
     print(f"Total documents loaded: {len(all_documents)}")
-    print(f"Documents after quality filtering: {len(pain_filtered_docs_filter_2)}")
-    print(f"Filtered {len(all_documents) - len(pain_filtered_docs_filter_2)} low-quality documents")
-    # print(pain_filtered_docs_filter_2)
-
-    # EMBEDDINGS TO Qdrant
-    embedding_service = QdrantEmbeddingService()
-    embedding_service.create_collection(recreate=False)
-    embedding_service.insert_documents(pain_filtered_docs_filter_2)
+    print(f"Documents after all filtering: {len(filtered_documents)}")
+    print(f"Filtered {len(all_documents) - len(filtered_documents)} documents")
 
     # Print first few filtered documents if you want to inspect them
-    # for i, doc in enumerate(pain_filtered_docs_filter_2[:200], 1):
-    #     print(f"\nDocument {i}:")
-    #     print(f"Source file: {doc.metadata['source_file']}")
-    #     # print(f"Quality Score: {doc.metadata['quality_metrics']['overall_quality']:.2f}")
-    #     print(f"Page Content (first 200 chars):\n{doc.page_content[:200]}...")
-    #     print(f"Metadata: {doc.metadata}")
-    #     print("-" * 50)
+    for i, doc in enumerate(filtered_documents[:5], 1):
+        print(f"\nDocument {i}:")
+        print(f"Source file: {doc.metadata['source_file']}")
+        print(f"Page Content (first 200 chars):\n{doc.page_content[:200]}...")
+        print("-" * 50)

@@ -2,8 +2,8 @@ import json
 import os
 from typing import List, Dict, Any
 from langchain.schema import Document
-from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from AdvancedPreprocessingImplementation.archived_filters.filter_3_noise import NoiseDetector
+from AdvancedPreprocessingImplementation.no_2_filter_2_pain_detection import AdvancedPainDetector
+from archive.archived_filters.no_4_filter_3_noise import NoiseDetector
 import numpy as np
 from embedded_to_qdrant import QdrantEmbeddingService   # MY EMBEDDEDINGS
 

@@ -2,23 +2,19 @@ import json
 import os
 from typing import List, Dict, Any
 from langchain.schema import Document
-from AdvancedPreprocessingImplementation.filter_2_pain_detection import AdvancedPainDetector
-from AdvancedPreprocessingImplementation.archived_filters.filter_3_noise import NoiseDetector
+from AdvancedPreprocessingImplementation.no_1_filter_1_quality_metrics import filter_by_quality
+from AdvancedPreprocessingImplementation.no_2_filter_2_pain_detection import AdvancedPainDetector
+from AdvancedPreprocessingImplementation.no_3_filter_3_noise_filteringV2 import RedditNoiseFilter
 import numpy as np
-from AdvancedPreprocessingImplementation.embedded_to_qdrant import QdrantEmbeddingService   # MY EMBEDDEDINGS
+from AdvancedPreprocessingImplementation.no_4_embedded_to_qdrant import QdrantEmbeddingService
+from qdrant_search_idea_generator import QdrantSearchAndIdeaGenerator
+
 
 
 
 def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str = "") -> List[Document]:
     """
     Convert JSON topics with comments to LangChain Document objects.
-
-    Args:
-        json_data: List of topic dictionaries with the specified structure
-        filename: Source filename to include in metadata
-
-    Returns:
-        List of LangChain Document objects
     """
     documents = []
 
@@ -33,7 +29,7 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
 
         for comment in comments:
             body = comment.get("body", "")
-            if body:  # Only add non-empty comment bodies
+            if body:
                 comment_bodies.append(body)
 
         # Create page_content by combining title, selftext, and comments
@@ -70,7 +66,7 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
             "spoiler": topic.get("spoiler", False),
             "locked": topic.get("locked", False),
             "comments_extracted": topic.get("comments_extracted", 0),
-            "source_file": filename  # Add the source filename to metadata
+            "source_file": filename
         }
 
         # Create Document object
@@ -87,17 +83,10 @@ def json_to_langchain_documents(json_data: List[Dict[str, Any]], filename: str =
 def load_json_from_file(file_path: str) -> List[Dict[str, Any]]:
     """
     Load JSON data from a file.
-
-    Args:
-        file_path: Path to the JSON file
-
-    Returns:
-        List of topic dictionaries
     """
     with open(file_path, 'r', encoding='utf-8') as file:
         data = json.load(file)
 
-    # Handle both single topic and list of topics
     if isinstance(data, dict):
         return [data]
     elif isinstance(data, list):
@@ -109,23 +98,14 @@ def load_json_from_file(file_path: str) -> List[Dict[str, Any]]:
 def load_all_json_files_from_directory(directory: str) -> List[Document]:
     """
     Load all JSON files from a directory and convert them to LangChain Documents.
-
-    Args:
-        directory: Path to the directory containing JSON files
-
-    Returns:
-        Combined list of all LangChain Document objects from all files
     """
     all_documents = []
 
-    # Iterate through all files in the directory
     for filename in os.listdir(directory):
         if filename.endswith('.json'):
             file_path = os.path.join(directory, filename)
             try:
-                # Load JSON data from file
                 json_data = load_json_from_file(file_path)
-                # Convert to documents and add filename metadata
                 documents = json_to_langchain_documents(json_data, filename)
                 all_documents.extend(documents)
             except Exception as e:
@@ -135,80 +115,163 @@ def load_all_json_files_from_directory(directory: str) -> List[Document]:
     return all_documents
 
 
+def create_document_id_mapping(documents: List[Document]) -> Dict[str, Document]:
+    """
+    Create a mapping from document IDs to Document objects for efficient lookup.
+    """
+    # Create mapping using the same ID generation logic as QdrantEmbeddingService
+    import hashlib
+    import uuid
+
+    id_to_doc = {}
+    for doc in documents:
+        # Use the same logic as in QdrantEmbeddingService._generate_document_id_and_hash
+        content_hash = hashlib.md5(doc.page_content.encode('utf-8')).hexdigest()
+        source_info = doc.metadata.get('source_file', '')
+        consistent_id_string = f"{content_hash}-{source_info}"
+        point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, consistent_id_string))
+        id_to_doc[point_id] = doc
+
+    return id_to_doc
+
+
+def sync_metadata_with_qdrant(embedding_service: QdrantEmbeddingService,
+                              documents: List[Document]) -> None:
+    """
+    Synchronize all metadata from documents to Qdrant.
+    This ensures that quality and pain metrics are properly stored in Qdrant.
+    """
+    print("Synchronizing metadata with Qdrant...")
+
+    # Create document ID mapping
+    id_to_doc = create_document_id_mapping(documents)
+
+    # Update metadata in batches
+    batch_size = 100
+    doc_ids = list(id_to_doc.keys())
+
+    for i in range(0, len(doc_ids), batch_size):
+        batch_ids = doc_ids[i:i + batch_size]
+
+        for doc_id in batch_ids:
+            doc = id_to_doc[doc_id]
+
+            # Prepare payload with all metadata
+            payload = {}
+            for key, value in doc.metadata.items():
+                if isinstance(value, (np.integer, np.floating)):
+                    payload[key] = float(value)
+                elif value is None:
+                    payload[key] = ""
+                else:
+                    payload[key] = value
+
+            # Add text content
+            payload['text'] = doc.page_content
+            payload['text_length'] = len(doc.page_content)
+
+            try:
+                embedding_service.qdrant_client.set_payload(
+                    collection_name=embedding_service.collection_name,
+                    payload=payload,
+                    points=[doc_id]
+                )
+            except Exception as e:
+                print(f"Error updating metadata for document {doc_id}: {e}")
+                continue
+
+    print(f"Metadata synchronization complete for {len(documents)} documents")
+
+
+def interactive_search(embedding_service: QdrantEmbeddingService):
+    """
+    Handle user interaction and display results
+    """
+    idea_generator = QdrantSearchAndIdeaGenerator(embedding_service)
+
+    print("\nProduct Idea Generator - Enter a query or 'exit' to quit")
+    while True:
+        query = input("\nEnter your query: ").strip()
+        if query.lower() == 'exit':
+            break
+
+        if not query:
+            print("Please enter a valid query.")
+            continue
+
+        print(f"\nProcessing query: '{query}'...")
+
+        try:
+            # Process the query through the generator
+            results = idea_generator.process_query(query)
+
+            # Display search results
+            if results["search_results"]:
+                print(f"\nTop {len(results['search_results'])} relevant discussions:")
+                for i, result in enumerate(results["search_results"], 1):
+                    comment_sim = result['payload'].get('comment_similarity_score', 'N/A')
+                    if comment_sim != 'N/A':
+                        comment_sim = f"{comment_sim:.2f}"
+                    print(f"{i}. Score: {result['score']:.2f} | Quality: {result['quality_score']:.2f} | "
+                          f"Pain: {result['pain_score']:.2f} | Comment Similarity: {comment_sim}")
+                    print(f"   Source: {result['payload'].get('subreddit', 'N/A')}")
+                    print(f"   Content preview: {result['payload']['text'][:200]}...\n")
+            else:
+                print("No search results found.")
+
+            # Display generated ideas
+            print("\nGenerated Product Ideas:\n")
+            print(results["ideas"])
+
+        except Exception as e:
+            print(f"An error occurred: {str(e)}")
+
 
 if __name__ == "__main__":
     # Load all documents from the datasets directory
+    print("Loading documents from datasets directory...")
     all_documents = load_all_json_files_from_directory('datasets')
+    print(f"Total documents loaded: {len(all_documents)}")
 
+    # Apply quality filter
+    print("Applying quality filter...")
+    quality_threshold = 0.5
+    quality_filtered_documents = filter_by_quality(all_documents, min_score=quality_threshold)
+    print(f"Documents after quality filtering: {len(quality_filtered_documents)}")
 
+    # Apply pain detection filter
+    print("Applying pain detection filter...")
     pain_detector = AdvancedPainDetector()
-    pain_filtered_docs_filter_2 = pain_detector.filter_documents_by_pain(
-        all_documents,
-        min_pain_score=0.01, #why this score should be set that low
+    pain_filtered_documents = pain_detector.filter_documents_by_pain(
+        quality_filtered_documents,
+        min_pain_score=0.005,
         max_pain_score=1.0
     )
-    # Print summary information
-    print(f"Total documents loaded: {len(all_documents)}")
-    print(f"Documents after quality filtering: {len(pain_filtered_docs_filter_2)}")
-    print(f"Filtered {len(all_documents) - len(pain_filtered_docs_filter_2)} low-quality documents")
+    print(f"Documents after pain filtering: {len(pain_filtered_documents)}")
 
-    # EMBEDDINGS TO Qdrant
+    # Apply noise filtering
+    print("Applying noise filtering...")
+    noise_filter = RedditNoiseFilter(noise_threshold=0.52)
+    noise_filtered_documents = noise_filter.filter_documents_by_noise(pain_filtered_documents)
+    print(f"Documents after noise filtering: {len(noise_filtered_documents)}")
+
+    # Insert documents into Qdrant with embeddings
+    print("Inserting documents into Qdrant...")
     embedding_service = QdrantEmbeddingService()
     embedding_service.create_collection(recreate=False)
-    embedding_service.insert_documents(pain_filtered_docs_filter_2)
+    embedding_service.insert_documents(noise_filtered_documents)
 
-    QDRANT_HOST = "localhost"
-    QDRANT_PORT = 6333
-    COLLECTION_NAME = "reddit_pain_documents"  # This should match the collection name used by QdrantEmbeddingService
+    # Sync all metadata to Qdrant (ensures quality, pain, and noise metrics are stored)
+    sync_metadata_with_qdrant(embedding_service, noise_filtered_documents)
 
-    EPS = 0.5
-    MIN_SAMPLES = 5
+    # Print summary
+    print(f"\nPipeline Summary:")
+    print(f"Total documents loaded: {len(all_documents)}")
+    print(f"After quality filtering: {len(quality_filtered_documents)}")
+    print(f"After pain filtering: {len(pain_filtered_documents)}")
+    print(f"After noise filtering: {len(noise_filtered_documents)}")
+    print("Pipeline processing complete.")
 
-    FEATURE_PAYLOAD_KEYS = [
-        ["pain_metrics", "pain_score"],
-        "score",  # Top-level score
-        "upvote_ratio",  # Top-level upvote_ratio
-        "num_comments",  # Top-level num_comments
-        ["pain_metrics", "post_pain", "sentiment", "compound"],
-        ["pain_metrics", "post_pain", "keyword_matches", "frustration"],
-        ["pain_metrics", "post_pain", "total_keyword_matches"],
-        # Add other numerical fields you want to use for noise detection
-    ]
-
-
-    noise_detector = NoiseDetector(
-        qdrant_host=QDRANT_HOST,
-        qdrant_port=QDRANT_PORT,
-        collection_name=COLLECTION_NAME,
-        eps=EPS,
-        min_samples=MIN_SAMPLES,
-        feature_payload_keys=FEATURE_PAYLOAD_KEYS
-    )
-
-    # Perform noise detection using the detector instance
-    all_doc_ids, all_features, all_doc_payloads, cluster_labels = noise_detector.detect_noise()
-
-    if not all_doc_ids:
-        print("Exiting due to no data after noise detection retrieval.")
-        exit()
-
-    # Identify noise points from the cluster labels
-    noise_point_indices = np.where(cluster_labels == -1)[0]
-    noise_document_ids = [all_doc_ids[i] for i in noise_point_indices]
-
-    # Update Qdrant with the noise flags
-    noise_detector.update_noise_flags_in_qdrant(noise_document_ids, all_doc_ids)
-
-    unique_labels, counts = np.unique(cluster_labels, return_counts=True)
-    cluster_distribution = dict(zip(unique_labels, counts))
-    print("Noise detection and Qdrant payload update complete.")
-
-
-    # Print first few filtered documents if you want to inspect them
-    # for i, doc in enumerate(pain_filtered_docs_filter_2[:200], 1):
-    #     print(f"\nDocument {i}:")
-    #     print(f"Source file: {doc.metadata['source_file']}")
-    #     # print(f"Quality Score: {doc.metadata['quality_metrics']['overall_quality']:.2f}")
-    #     print(f"Page Content (first 200 chars):\n{doc.page_content[:200]}...")
-    #     print(f"Metadata: {doc.metadata}")
-    #     print("-" * 50)
+    print("\nPipeline execution complete. Starting interactive search...")
+    embedding_service = QdrantEmbeddingService()
+    interactive_search(embedding_service)

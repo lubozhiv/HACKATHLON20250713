@@ -2,7 +2,7 @@ import json
 import os
 from typing import List, Dict, Any, Tuple
 import numpy as np
-from sentence_transformers import SentenceTransformer
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, PointIdsList, CollectionInfo
 from langchain.schema import Document
@@ -17,11 +17,11 @@ logger = logging.getLogger(__name__)
 
 class QdrantEmbeddingService:
     """
-    Service for embedding documents using BERT and storing them in Qdrant vector database.
+    Service for embedding documents using OpenAI and storing them in Qdrant vector database.
     """
 
     def __init__(self,
-                 model_name: str = "all-MiniLM-L6-v2", #"all-mpnet-base-v2" 768 dim as alternative to current 384 dim
+                 model_name: str = "text-embedding-ada-002",
                  qdrant_url: str = "localhost",
                  qdrant_port: int = 6333,
                  collection_name: str = "reddit_pain_documents"):
@@ -29,7 +29,7 @@ class QdrantEmbeddingService:
         Initialize the embedding service.
 
         Args:
-            model_name: Name of the sentence transformer model to use
+            model_name: Name of the OpenAI embedding model to use
             qdrant_url: Qdrant server URL
             qdrant_port: Qdrant server port
             collection_name: Name of the Qdrant collection
@@ -37,16 +37,21 @@ class QdrantEmbeddingService:
         self.model_name = model_name
         self.collection_name = collection_name
 
-        # Initialize BERT model
-        self.model = SentenceTransformer(model_name)
+        # Initialize OpenAI embeddings model
+        self.model = OpenAIEmbeddings(
+            model=model_name,
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("OPENAI_API_KEY"),
+            show_progress_bar=True
+        )
 
         # Initialize Qdrant client
         self.qdrant_client = QdrantClient(host=qdrant_url, port=qdrant_port)
 
-        # Get embedding dimension
-        self.embedding_dim = self.model.get_sentence_embedding_dimension()
+        # OpenAI's text-embedding-ada-002 has 1536 dimensions
+        self.embedding_dim = 1536
 
-    def create_collection(self, recreate: bool = False) -> None:
+    def create_collection(self, recreate: bool = True) -> None:
         """
         Create Qdrant collection if it doesn't exist.
 
@@ -113,28 +118,73 @@ class QdrantEmbeddingService:
             logger.warning(f"Could not retrieve existing point info for IDs {point_ids}: {e}")
         return existing_hashes
 
-    def embed_documents(self, documents: List[Document]) -> List[np.ndarray]:
+    def embed_documents(self, documents: List[Document], batch_size: int = 50) -> List[np.ndarray]:
         """
-        Generate embeddings for a list of documents.
+        Generate embeddings for a list of documents with token limit handling.
 
         Args:
             documents: List of LangChain Document objects
+            batch_size: Number of documents to process at once (adjust based on content length)
 
         Returns:
             List of embedding vectors
         """
         logger.info(f"Generating embeddings for {len(documents)} documents")
 
+        all_embeddings = []
         texts = [doc.page_content for doc in documents]
-        embeddings = []
-        batch_size = 32
 
-        for i in tqdm(range(0, len(texts), batch_size), desc="Embedding documents"):
+        # Process in batches to handle token limits
+        for i in tqdm(range(0, len(texts), batch_size), desc="Generating embeddings"):
             batch_texts = texts[i:i + batch_size]
-            batch_embeddings = self.model.encode(batch_texts, show_progress_bar=False)
-            embeddings.extend(batch_embeddings)
 
-        return embeddings
+            # Estimate tokens (rough approximation: 1 token ≈ 4 characters)
+            batch_token_count = sum(len(text) for text in batch_texts) // 4
+
+            # If batch is too large, reduce batch size dynamically
+            if batch_token_count > 250000:  # Leave some margin under 300k limit
+                # Reduce batch size and retry
+                smaller_batch_size = max(1, batch_size // 2)
+                logger.warning(
+                    f"Batch too large ({batch_token_count} tokens), reducing batch size to {smaller_batch_size}")
+
+                # Process this batch with smaller size
+                for j in range(i, min(i + batch_size, len(texts)), smaller_batch_size):
+                    small_batch = texts[j:j + smaller_batch_size]
+                    try:
+                        batch_embeddings = self.model.embed_documents(small_batch)
+                        all_embeddings.extend([np.array(emb) for emb in batch_embeddings])
+                    except Exception as e:
+                        logger.error(f"Error processing small batch starting at index {j}: {str(e)}")
+                        # If even a small batch fails, process documents individually
+                        for text in small_batch:
+                            try:
+                                single_embedding = self.model.embed_query(text)
+                                all_embeddings.append(np.array(single_embedding))
+                            except Exception as single_error:
+                                logger.error(f"Failed to embed single document: {str(single_error)}")
+                                # Create a zero vector as fallback
+                                all_embeddings.append(np.zeros(self.embedding_dim))
+            else:
+                # Normal batch processing
+                try:
+                    batch_embeddings = self.model.embed_documents(batch_texts)
+                    all_embeddings.extend([np.array(emb) for emb in batch_embeddings])
+                except Exception as e:
+                    logger.error(f"Error processing batch starting at index {i}: {str(e)}")
+                    # Fallback to individual processing for this batch
+                    for text in batch_texts:
+                        try:
+                            single_embedding = self.model.embed_query(text)
+                            all_embeddings.append(np.array(single_embedding))
+                        except Exception as single_error:
+                            logger.error(f"Failed to embed single document: {str(single_error)}")
+                            # Create a zero vector as fallback
+                            all_embeddings.append(np.zeros(self.embedding_dim))
+
+        logger.info(f"Generated {len(all_embeddings)} embeddings")
+        return all_embeddings
+
 
     def prepare_points(self, documents: List[Document], embeddings: List[np.ndarray]) -> List[PointStruct]:
         """
@@ -172,14 +222,15 @@ class QdrantEmbeddingService:
 
         return points
 
-    def insert_documents(self, documents: List[Document], batch_size: int = 100) -> None:
+    def insert_documents(self, documents: List[Document], batch_size: int = 10, embedding_batch_size: int = 20) -> None:
         """
         Insert documents into Qdrant database, avoiding re-embedding and re-uploading
         of unchanged documents.
 
         Args:
             documents: List of LangChain Document objects
-            batch_size: Number of documents to process and insert at once
+            batch_size: Number of documents to insert into Qdrant at once
+            embedding_batch_size: Number of documents to embed at once (smaller to handle token limits)
         """
         documents_to_process: List[Document] = []
         point_ids_to_process: List[str] = []
@@ -226,18 +277,13 @@ class QdrantEmbeddingService:
 
         logger.info(f"Found {len(documents_to_process)} documents requiring embedding/upserting.")
 
-        # Generate embeddings only for the documents that need processing
-        embeddings = self.embed_documents(documents_to_process)
+        # Generate embeddings with smaller batch size to handle token limits
+        embeddings = self.embed_documents(documents_to_process, batch_size=embedding_batch_size)
 
         # Prepare points with their now-known stable IDs and metadata
-        # We need to ensure the order of documents_to_process matches embeddings
-        # For simplicity, we re-run prepare_points, but if you want to optimize further,
-        # you could pass original_indices_to_process and filter from the original list.
-        # However, passing `documents_to_process` and `embeddings` (which match in order) is cleaner.
         points_to_upsert = []
         for doc_to_embed, embedding in zip(documents_to_process, embeddings):
-            point_id, content_hash = self._generate_document_id_and_hash(
-                doc_to_embed)  # Re-derive for point_id and hash
+            point_id, content_hash = self._generate_document_id_and_hash(doc_to_embed)
 
             metadata = doc_to_embed.metadata.copy()
             for key, value in metadata.items():
@@ -270,6 +316,7 @@ class QdrantEmbeddingService:
 
         logger.info(f"Successfully upserted {len(documents_to_process)} documents (new or updated).")
 
+
     def search_similar_documents(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Search for similar documents in the vector database.
@@ -282,7 +329,8 @@ class QdrantEmbeddingService:
             List of similar documents with metadata
         """
         # Generate query embedding
-        query_embedding = self.model.encode([query])[0]
+        query_embedding = self.model.embed_query(query)
+        query_embedding = np.array(query_embedding)
 
         # Search in Qdrant
         search_results = self.qdrant_client.search(
